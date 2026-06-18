@@ -1,348 +1,468 @@
-servidor.py -- /home/pi/ventilacao/
-
-
-#!/usr/bin/env python3
-import asyncio, json, os, serial, serial.tools.list_ports
-import websockets, http.server, threading, time
-from datetime import datetime
-
-PORTA_ARDUINO = None
-BAUD_RATE     = 9600
-WS_PORT       = 8765
-HTTP_PORT     = 8080
-HTML_FILE     = os.path.join(os.path.dirname(__file__), "painel.html")#!/usr/bin/env python3
-import asyncio, json, os, serial, serial.tools.list_ports
-import websockets, http.server, threading, time
-from datetime import datetime
-
-PORTA_ARDUINO = None
-
-estado = {
-    "temperatura": None, "umidade": None,
-    "alunos": 0, "ventilador": False,
-    "ultimo_uid": None, "temp_limite": 28.0,
-}
-clientes_ws = set()
-serial_conn = None
-
-def detectar_arduino():
-    portas = serial.tools.list_ports.comports()
-    for p in portas:
-        desc = (p.description or "").lower()
-        fab  = (p.manufacturer or "").lower()
-        if any(x in desc + fab for x in ["arduino","ch340","cp210","ftdi","acm"]):
-            print(f"[SERIAL] Arduino em {p.device}")
-            return p.device
-    for p in portas:
-        if "ttyACM" in p.device or "ttyUSB" in p.device or "COM" in p.device:
-            return p.device
-    return None
-
-def parsear_linha(linha):
-    linha = linha.strip()
-    if not linha: return None
-    evento = {"tipo": "log", "msg": linha, "ts": datetime.now().strftime("%H:%M:%S")}
-
-    if linha.startswith("ENTRADA:"):
-        uid = linha.split(":",1)[1]
-        estado["ultimo_uid"] = uid
-        evento.update({"tipo":"entrada","uid":uid,"msg":f"Entrada — cartão {uid}"})
-    elif linha.startswith("SAIDA:"):
-        uid = linha.split(":",1)[1]
-        estado["ultimo_uid"] = uid
-        evento.update({"tipo":"saida","uid":uid,"msg":f"Saída — cartão {uid}"})
-    elif linha.startswith("ALUNOS:"):
-        n = int(linha.split(":",1)[1])
-        estado["alunos"] = n
-        evento.update({"tipo":"alunos","valor":n,"msg":f"Alunos presentes: {n}"})
-    elif linha.startswith("TEMP:"):
-        partes = linha.split(";")
-        temp = float(partes[0].split(":",1)[1])
-        umid = float(partes[1].split(":",1)[1]) if len(partes)>1 else None
-        estado["temperatura"] = temp
-        if umid is not None: estado["umidade"] = umid
-        evento.update({"tipo":"temp","temp":temp,"umid":umid,
-            "msg":f"Temp: {temp:.1f}°C"+(f" · Umidade: {umid:.1f}%" if umid else "")})
-    elif linha == "VENTILADOR:LIGADO":
-        estado["ventilador"] = True
-        evento.update({"tipo":"ventilador","ligado":True,"msg":"Ventilador ligado"})
-    elif linha == "VENTILADOR:DESLIGADO":
-        estado["ventilador"] = False
-        evento.update({"tipo":"ventilador","ligado":False,"msg":"Ventilador desligado"})
-    elif linha.startswith("TEMP_LIMITE_ATUALIZADO:"):
-        val = float(linha.split(":",1)[1])
-        estado["temp_limite"] = val
-        evento.update({"tipo":"temp_limite","valor":val,"msg":f"Limite atualizado para {val:.1f}°C"})
-    elif linha.startswith("TEMP_LIMITE:"):
-        val = float(linha.split(":",1)[1])
-        estado["temp_limite"] = val
-        evento.update({"tipo":"temp_limite","valor":val,"msg":f"Limite atual: {val:.1f}°C"})
-    elif linha.startswith("CARTAO_INVALIDO:"):
-
-
-
-painel.html -- /home/pi/ventilacao/
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ventilação Automática</title>
+<title>Controle de Clima Inteligente | Monitor de Laboratório</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Inter:wght@300;400;600&display=swap');
+
   :root {
-    --bg:#f5f5f3; --surface:#ffffff; --surface2:#f0efed;
-    --border:rgba(0,0,0,0.1); --border2:rgba(0,0,0,0.06);
-    --text1:#1a1a18; --text2:#6b6b67; --text3:#a0a09c;
-    --green:#3b6d11; --green-bg:#eaf3de;
-    --blue:#185fa5;  --blue-bg:#e6f1fb;
-    --red:#a32d2d;   --red-bg:#fcebeb;
-    --mono:'Courier New',monospace;
+    --bg: #0a0b10;
+    --card-bg: rgba(23, 25, 35, 0.8);
+    --accent-blue: #00d2ff;
+    --accent-green: #00ff87;
+    --accent-red: #ff4b2b;
+    --text-main: #e2e8f0;
+    --text-dim: #94a3b8;
+    --border: rgba(255, 255, 255, 0.08);
+    --glass: blur(12px);
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg:#1a1a18; --surface:#242422; --surface2:#2e2e2b;
-      --border:rgba(255,255,255,0.1); --border2:rgba(255,255,255,0.06);
-      --text1:#f0efec; --text2:#999992; --text3:#666660;
-      --green:#97c459; --green-bg:#1a2e09;
-      --blue:#85b7eb;  --blue-bg:#0c2040;
-      --red:#f09595;   --red-bg:#2d0f0f;
-    }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    background-image: 
+      radial-gradient(circle at 20% 30%, rgba(0, 210, 255, 0.05) 0%, transparent 40%),
+      radial-gradient(circle at 80% 70%, rgba(0, 255, 135, 0.05) 0%, transparent 40%);
+    color: var(--text-main);
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+    padding: 2rem;
+    line-height: 1.6;
   }
-  body { background:var(--bg); color:var(--text1); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:14px; line-height:1.5; min-height:100vh; padding:1.5rem; }
-  header { display:flex; align-items:center; justify-content:space-between; margin-bottom:1.25rem; }
-  header h1 { font-size:16px; font-weight:500; }
-  header p  { font-size:12px; color:var(--text2); }
-  .conn-badge { font-size:11px; font-weight:500; padding:4px 10px; border-radius:999px; display:flex; align-items:center; gap:5px; }
-  .conn-badge.conectado    { background:var(--green-bg); color:var(--green); }
-  .conn-badge.desconectado { background:var(--red-bg);   color:var(--red);   }
-  .conn-badge.aguardando   { background:var(--surface2); color:var(--text2); }
-  .conn-dot { width:7px; height:7px; border-radius:50%; background:currentColor; }
-  .grid { display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:10px; margin-bottom:1rem; }
-  @media(max-width:700px){ .grid{ grid-template-columns:1fr 1fr; } }
-  .card { background:var(--surface); border:0.5px solid var(--border); border-radius:12px; padding:1rem 1.1rem; }
-  .card-label { font-size:11px; color:var(--text2); margin-bottom:4px; }
-  .card-value { font-size:26px; font-weight:500; }
-  .card-sub   { font-size:12px; color:var(--text3); margin-top:3px; }
-  .main-grid { display:grid; grid-template-columns:1fr 280px; gap:1rem; }
-  @media(max-width:700px){ .main-grid{ grid-template-columns:1fr; } }
-  .sec-title { font-size:12px; font-weight:500; color:var(--text2); margin-bottom:10px; text-transform:uppercase; letter-spacing:0.05em; }
-  .log-wrap { background:var(--surface); border:0.5px solid var(--border); border-radius:12px; padding:1rem 1.1rem; display:flex; flex-direction:column; height:400px; }
-  .log-area { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:5px; }
-  .log-area::-webkit-scrollbar{ width:4px; }
-  .log-area::-webkit-scrollbar-thumb{ background:var(--border); border-radius:4px; }
-  .log-item { display:flex; gap:10px; align-items:baseline; font-size:12px; }
-  .log-ts   { color:var(--text3); font-family:var(--mono); flex-shrink:0; }
-  .log-msg  { color:var(--text2); }
-  .log-item.entrada .log-msg { color:var(--green); }
-  .log-item.saida   .log-msg { color:var(--blue);  }
-  .log-item.on      .log-msg { color:var(--green); font-weight:500; }
-  .log-item.off     .log-msg { color:var(--text2); }
-  .log-item.erro    .log-msg { color:var(--red);   }
-  .log-item.limite  .log-msg { color:var(--blue);  font-weight:500; }
-  .right-col { display:flex; flex-direction:column; gap:1rem; }
-  .ac-card { background:var(--surface); border:0.5px solid var(--border); border-radius:12px; padding:1rem 1.1rem; display:flex; flex-direction:column; align-items:center; gap:10px; flex:1; }
-  .ac-status { font-size:12px; font-weight:500; padding:4px 14px; border-radius:999px; }
-  .ac-status.on  { background:var(--green-bg); color:var(--green); }
-  .ac-status.off { background:var(--surface2); color:var(--text2); }
-  .temp-ctrl { background:var(--surface); border:0.5px solid var(--border); border-radius:12px; padding:1rem 1.1rem; }
-  .temp-row  { display:flex; align-items:center; gap:8px; margin-top:8px; }
-  .temp-input { width:80px; font-size:20px; font-weight:500; background:var(--surface2); color:var(--text1); border:0.5px solid var(--border); border-radius:8px; padding:6px 10px; text-align:center; }
-  .temp-input:focus { outline:none; border-color:var(--blue); }
-  .temp-unit { font-size:14px; color:var(--text2); }
-  .btn-set { flex:1; padding:8px; font-size:13px; font-weight:500; background:var(--blue-bg); color:var(--blue); border:0.5px solid var(--border); border-radius:8px; cursor:pointer; transition:opacity .15s; }
-  .btn-set:hover { opacity:0.8; }
-  .temp-atual { font-size:11px; color:var(--text3); margin-top:6px; }
-  .bar-wrap { width:100%; height:5px; background:var(--surface2); border-radius:99px; overflow:hidden; margin-top:5px; }
-  .bar-fill { height:100%; background:var(--green); border-radius:99px; width:0%; transition:width .5s ease; }
-  @keyframes airflow {
-    0%  { opacity:0; transform:translateX(0) scaleY(1); }
-    35% { opacity:1; }
-    100%{ opacity:0; transform:translateX(24px) scaleY(0.5); }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2.5rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.5rem;
   }
-  .air { opacity:0; }
-  .ac-on .air:nth-child(1){ animation:airflow 1.5s ease-in-out infinite 0.0s; }
-  .ac-on .air:nth-child(2){ animation:airflow 1.5s ease-in-out infinite 0.3s; }
-  .ac-on .air:nth-child(3){ animation:airflow 1.5s ease-in-out infinite 0.6s; }
-  .ac-on .air:nth-child(4){ animation:airflow 1.5s ease-in-out infinite 0.9s; }
-  .ac-on .air:nth-child(5){ animation:airflow 1.5s ease-in-out infinite 1.2s; }
-  footer { margin-top:1rem; font-size:11px; color:var(--text3); text-align:center; }
+
+  .brand h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    background: linear-gradient(to right, var(--accent-blue), var(--accent-green));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .brand p {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .conn-status {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 1rem;
+    background: var(--card-bg);
+    border-radius: 100px;
+    border: 1px solid var(--border);
+    font-size: 0.75rem;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4a5568;
+    box-shadow: 0 0 10px rgba(0,0,0,0.5);
+  }
+
+  .conectado .status-dot { background: var(--accent-green); box-shadow: 0 0 12px var(--accent-green); }
+  .desconectado .status-dot { background: var(--accent-red); box-shadow: 0 0 12px var(--accent-red); }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+  }
+
+  .stat-card {
+    background: var(--card-bg);
+    backdrop-filter: var(--glass);
+    border: 1px solid var(--border);
+    border-radius: 1.25rem;
+    padding: 1.5rem;
+    transition: transform 0.2s ease, border-color 0.2s ease;
+  }
+
+  .stat-card:hover {
+    border-color: rgba(255,255,255,0.15);
+    transform: translateY(-2px);
+  }
+
+  .stat-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    margin-bottom: 0.75rem;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .stat-value {
+    font-size: 2.5rem;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    margin-bottom: 0.5rem;
+  }
+
+  .stat-sub {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+
+  .main-layout {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 1.5rem;
+  }
+
+  @media (max-width: 900px) {
+    .main-layout { grid-template-columns: 1fr; }
+  }
+
+  .panel-box {
+    background: var(--card-bg);
+    backdrop-filter: var(--glass);
+    border: 1px solid var(--border);
+    border-radius: 1.25rem;
+    padding: 1.5rem;
+  }
+
+  .section-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 1.25rem;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .log-container {
+    height: 400px;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+  }
+
+  .log-container::-webkit-scrollbar { width: 4px; }
+  .log-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+
+  .log-entry {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    display: flex;
+    gap: 1rem;
+  }
+
+  .log-time { color: var(--text-dim); opacity: 0.6; flex-shrink: 0; }
+  .log-msg { color: var(--text-main); }
+  .log-entry.entrada .log-msg { color: var(--accent-green); }
+  .log-entry.saida .log-msg { color: var(--accent-blue); }
+  .log-entry.on .log-msg { color: var(--accent-green); font-weight: 500; }
+  .log-entry.erro .log-msg { color: var(--accent-red); }
+
+  .control-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .ac-viz {
+    text-align: center;
+    padding: 1rem;
+    background: rgba(0,0,0,0.2);
+    border-radius: 1rem;
+    position: relative;
+  }
+
+  .ac-icon {
+    width: 120px;
+    height: 120px;
+    margin: 0 auto 1rem;
+    fill: none;
+    stroke: var(--text-dim);
+    stroke-width: 1.5;
+    transition: all 0.5s ease;
+  }
+
+  .ac-on .ac-icon {
+    stroke: var(--accent-blue);
+    filter: drop-shadow(0 0 15px rgba(0, 210, 255, 0.4));
+  }
+
+  .ac-status-badge {
+    display: inline-block;
+    padding: 0.25rem 1rem;
+    border-radius: 100px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: #1a1c24;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+
+  .ac-on .ac-status-badge {
+    background: rgba(0, 210, 255, 0.1);
+    color: var(--accent-blue);
+    border-color: rgba(0, 210, 255, 0.2);
+  }
+
+  .temp-setter {
+    margin-top: auto;
+  }
+
+  .input-group {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  input[type="number"] {
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    padding: 0.75rem;
+    border-radius: 0.75rem;
+    width: 100%;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.1rem;
+    outline: none;
+  }
+
+  input[type="number"]:focus { border-color: var(--accent-blue); }
+
+  .btn-apply {
+    background: var(--accent-blue);
+    color: #000;
+    border: none;
+    padding: 0.75rem 1.25rem;
+    border-radius: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+
+  .btn-apply:hover { opacity: 0.9; }
+
+  .progress-bar {
+    width: 100%;
+    height: 4px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 10px;
+    margin-top: 1rem;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: var(--accent-green);
+    width: 0%;
+    transition: width 0.5s ease;
+    box-shadow: 0 0 10px var(--accent-green);
+  }
+
+  @keyframes wind {
+    0% { transform: translateY(0) opacity(0); }
+    50% { opacity: 1; }
+    100% { transform: translateY(10px) opacity(0); }
+  }
+
+  .wind-line {
+    stroke: var(--accent-blue);
+    stroke-dasharray: 4;
+    display: none;
+  }
+
+  .ac-on .wind-line {
+    display: block;
+    animation: wind 1.5s infinite linear;
+  }
+
+  footer {
+    margin-top: 3rem;
+    text-align: center;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    opacity: 0.5;
+  }
 </style>
 </head>
 <body>
 
 <header>
-  <div>
-    <h1>Ventilação Automática</h1>
-    <p>Arduino + Raspberry Pi — monitoramento em tempo real</p>
+  <div class="brand">
+    <h1>CLIMA INTELIGENTE</h1>
+    <p>// SISTEMA_MONITORAMENTO_LAB_v2.0</p>
   </div>
-  <div class="conn-badge aguardando" id="badge-conn">
-    <span class="conn-dot"></span>
-    <span id="badge-txt">Aguardando...</span>
+  <div class="conn-status aguardando" id="status-box">
+    <span class="status-dot"></span>
+    <span id="status-text">INICIALIZANDO...</span>
   </div>
 </header>
 
-<div class="grid">
-  <div class="card">
-    <div class="card-label">Temperatura</div>
-    <div class="card-value" id="val-temp">—</div>
-    <div class="card-sub">DHT11</div>
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-label">TEMPERATURA <span>DHT11</span></div>
+    <div class="stat-value" id="val-temp">--°C</div>
+    <div class="stat-sub">Ambiente atual do laboratório</div>
   </div>
-  <div class="card">
-    <div class="card-label">Umidade</div>
-    <div class="card-value" id="val-umid">—</div>
-    <div class="card-sub">DHT11</div>
+  <div class="stat-card">
+    <div class="stat-label">UMIDADE <span>DHT11</span></div>
+    <div class="stat-value" id="val-umid">--%</div>
+    <div class="stat-sub">Umidade relativa do ar</div>
   </div>
-  <div class="card">
-    <div class="card-label">Alunos presentes</div>
-    <div class="card-value" id="val-alunos">0</div>
-    <div class="bar-wrap"><div class="bar-fill" id="bar-alunos"></div></div>
+  <div class="stat-card">
+    <div class="stat-label">OCUPAÇÃO <span>RFID</span></div>
+    <div class="stat-value" id="val-alunos">0</div>
+    <div class="progress-bar"><div class="progress-fill" id="bar-alunos"></div></div>
+    <div class="stat-sub" style="margin-top:0.5rem">Alunos na sala</div>
   </div>
-  <div class="card">
-    <div class="card-label">Último cartão</div>
-    <div class="card-value" style="font-size:15px;font-family:var(--mono);margin-top:4px;" id="val-uid">—</div>
-    <div class="card-sub" id="val-uid-acao">—</div>
+  <div class="stat-card">
+    <div class="stat-label">ÚLTIMO ACESSO <span>UID</span></div>
+    <div class="stat-value" style="font-size:1.2rem; padding-top:1rem" id="val-uid">SEM_DADOS</div>
+    <div class="stat-sub" id="val-uid-acao">Sistema pronto</div>
   </div>
 </div>
 
-<div class="main-grid">
-  <div class="log-wrap">
-    <div class="sec-title">Log de eventos</div>
-    <div class="log-area" id="log-area"></div>
+<div class="main-layout">
+  <div class="panel-box">
+    <div class="section-title">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      LOG DE EVENTOS DO SISTEMA
+    </div>
+    <div class="log-container" id="log-area"></div>
   </div>
 
-  <div class="right-col">
-    <div class="ac-card">
-      <div class="sec-title" style="margin-bottom:0">Ar-condicionado</div>
-      <svg width="180" height="160" viewBox="0 0 190 170">
-        <rect x="10" y="20" width="170" height="75" rx="10" fill="var(--surface2)" stroke="var(--border)" stroke-width="1"/>
-        <rect x="10" y="20" width="170" height="20" rx="10" fill="var(--border)"/>
-        <rect x="10" y="30" width="170" height="10" fill="var(--border)"/>
-        <rect x="20" y="50" width="65" height="36" rx="4" fill="var(--surface)" stroke="var(--border2)" stroke-width="0.5"/>
-        <line x1="23" y1="62" x2="82" y2="62" stroke="var(--border)" stroke-width="0.5"/>
-        <line x1="23" y1="69" x2="82" y2="69" stroke="var(--border)" stroke-width="0.5"/>
-        <line x1="23" y1="76" x2="82" y2="76" stroke="var(--border)" stroke-width="0.5"/>
-        <rect x="96" y="50" width="74" height="36" rx="4" fill="var(--surface)" stroke="var(--border2)" stroke-width="0.5"/>
-        <circle cx="117" cy="68" r="11" fill="none" stroke="var(--border)" stroke-width="1"/>
-        <line x1="117" y1="59" x2="117" y2="77" stroke="var(--border)" stroke-width="0.5"/>
-        <line x1="108" y1="68" x2="126" y2="68" stroke="var(--border)" stroke-width="0.5"/>
-        <circle cx="154" cy="58" r="5" id="led-ac" fill="var(--border)"/>
-        <rect x="10" y="92" width="170" height="3" rx="1" fill="var(--border)"/>
-        <g id="ac-svg">
-          <path class="air" d="M15 108 Q40 102 65 108 Q90 114 115 108" fill="none" stroke="#85B7EB" stroke-width="2" stroke-linecap="round"/>
-          <path class="air" d="M20 120 Q50 113 80 120 Q110 127 140 120" fill="none" stroke="#B5D4F4" stroke-width="1.5" stroke-linecap="round"/>
-          <path class="air" d="M10 132 Q45 124 80 132 Q115 140 145 132" fill="none" stroke="#85B7EB" stroke-width="2" stroke-linecap="round"/>
-          <path class="air" d="M30 144 Q65 137 100 144 Q130 150 160 144" fill="none" stroke="#B5D4F4" stroke-width="1.5" stroke-linecap="round"/>
-          <path class="air" d="M45 156 Q80 149 115 156 Q145 162 175 156" fill="none" stroke="#85B7EB" stroke-width="1.5" stroke-linecap="round"/>
-        </g>
+  <div class="control-panel">
+    <div class="panel-box ac-viz" id="ac-container">
+      <div class="section-title" style="justify-content:center">UNIDADE DE CLIMA</div>
+      <svg class="ac-icon" viewBox="0 0 24 24">
+        <rect x="2" y="4" width="20" height="10" rx="2" />
+        <path d="M6 14v2M10 14v2M14 14v2M18 14v2" />
+        <path class="wind-line" d="M7 18v3M12 18v3M17 18v3" />
       </svg>
-      <span class="ac-status off" id="ac-badge">Desligado</span>
+      <div>
+        <span class="ac-status-badge" id="ac-badge">STANDBY</span>
+      </div>
     </div>
 
-    <div class="temp-ctrl">
-      <div class="sec-title">Limite para ligar</div>
-      <div class="temp-row">
-        <input type="number" class="temp-input" id="input-limite" min="10" max="40" step="0.5" value="28.0">
-        <span class="temp-unit">°C</span>
-        <button class="btn-set" onclick="enviarLimite()">Aplicar</button>
+    <div class="panel-box temp-setter">
+      <div class="section-title">CONTROLE DE LIMITE</div>
+      <p style="font-size:0.75rem; color:var(--text-dim); margin-bottom:0.5rem">Ativação automática em:</p>
+      <div class="input-group">
+        <input type="number" id="input-limite" min="10" max="40" step="0.5" value="28.0">
+        <button class="btn-apply" onclick="enviarLimite()">DEFINIR</button>
       </div>
-      <div class="temp-atual" id="limite-atual">Limite atual: 28.0°C</div>
+      <div id="limite-atual" style="font-size:0.7rem; color:var(--accent-blue); margin-top:0.8rem; font-family:'JetBrains Mono'">ALVO: 28.0°C</div>
     </div>
   </div>
 </div>
 
 <footer>
-  Porta: <span id="info-porta">detectando...</span> &nbsp;·&nbsp;
-  WebSocket: ws://localhost:8765 &nbsp;·&nbsp;
-  <span id="info-hora">—</span>
+  ID_NÓ: RASP_PI_01 // PORTA: 8765 // HORA_SISTEMA: <span id="info-hora">--:--:--</span>
 </footer>
 
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
-const MAX_LOG=80, MAX_ALUNO=30;
-let ws;
+const MAX_LOG=50, MAX_ALUNO=30;
+let socket;
 
 function ts(){ return new Date().toLocaleTimeString('pt-BR'); }
 
 function addLog(msg, tipo){
   const area=document.getElementById('log-area');
   const el=document.createElement('div');
-  el.className='log-item '+(tipo||'');
-  el.innerHTML=`<span class="log-ts">${ts()}</span><span class="log-msg">${msg}</span>`;
+  el.className='log-entry '+(tipo||'');
+  el.innerHTML=`<span class="log-time">[${ts()}]</span><span class="log-msg">${msg.toUpperCase()}</span>`;
   area.insertBefore(el, area.firstChild);
-  while(area.children.length>MAX_LOG) area.removeChild(area.lastChild);
-}
-
-function setAlunos(n){
-  document.getElementById('val-alunos').textContent=n;
-  document.getElementById('bar-alunos').style.width=Math.min(100,Math.round((n/MAX_ALUNO)*100))+'%';
-}
-
-function setAC(on){
-  const svg=document.getElementById('ac-svg');
-  const led=document.getElementById('led-ac');
-  const badge=document.getElementById('ac-badge');
-  if(on){ svg.classList.add('ac-on'); badge.textContent='Ligado'; badge.className='ac-status on'; led.setAttribute('fill','#639922'); }
-  else  { svg.classList.remove('ac-on'); badge.textContent='Desligado'; badge.className='ac-status off'; led.setAttribute('fill','var(--border)'); }
+  if(area.children.length>MAX_LOG) area.removeChild(area.lastChild);
 }
 
 function aplicarEstado(e){
   if(e.temperatura!=null) document.getElementById('val-temp').textContent=parseFloat(e.temperatura).toFixed(1)+'°C';
   if(e.umidade!=null)     document.getElementById('val-umid').textContent=parseFloat(e.umidade).toFixed(1)+'%';
-  setAlunos(e.alunos||0);
-  setAC(e.ventilador||false);
+  
+  const n = e.alunos||0;
+  document.getElementById('val-alunos').textContent=n;
+  document.getElementById('bar-alunos').style.width=Math.min(100,Math.round((n/MAX_ALUNO)*100))+'%';
+
+  const acOn = e.ventilador||false;
+  const acCont = document.getElementById('ac-container');
+  const acBadge = document.getElementById('ac-badge');
+  if(acOn){
+    acCont.classList.add('ac-on');
+    acBadge.textContent = 'ATIVO';
+  } else {
+    acCont.classList.remove('ac-on');
+    acBadge.textContent = 'STANDBY';
+  }
+
   if(e.ultimo_uid) document.getElementById('val-uid').textContent=e.ultimo_uid;
   if(e.temp_limite!=null){
     document.getElementById('input-limite').value=parseFloat(e.temp_limite).toFixed(1);
-    document.getElementById('limite-atual').textContent='Limite atual: '+parseFloat(e.temp_limite).toFixed(1)+'°C';
+    document.getElementById('limite-atual').textContent='ALVO: '+parseFloat(e.temp_limite).toFixed(1)+'°C';
   }
-}
-
-function setBadge(s){
-  document.getElementById('badge-conn').className='conn-badge '+s;
-  document.getElementById('badge-txt').textContent=s==='conectado'?'Conectado':s==='desconectado'?'Desconectado':'Aguardando...';
 }
 
 function enviarLimite(){
   const val=parseFloat(document.getElementById('input-limite').value);
-  if(isNaN(val)||val<10||val>40){ addLog('Valor inválido. Use entre 10°C e 40°C.','erro'); return; }
-  if(ws&&ws.readyState===WebSocket.OPEN){
-    ws.send(JSON.stringify({tipo:'settemp',valor:val}));
-    addLog(`Solicitando limite de ${val.toFixed(1)}°C...`,'limite');
-  } else { addLog('Sem conexão com o servidor.','erro'); }
+  if(isNaN(val)||val<10||val>40) return;
+  if(socket && socket.connected){
+    socket.emit('settemp',{valor:val});
+    addLog(`UPLINK: DEFINIR_LIMITE -> ${val.toFixed(1)}°C`,'');
+  }
 }
-
-document.addEventListener('DOMContentLoaded',()=>{
-  document.getElementById('input-limite').addEventListener('keydown',e=>{ if(e.key==='Enter') enviarLimite(); });
-});
 
 function conectar(){
-  setBadge('aguardando');
-  ws=new WebSocket('ws://localhost:8765');
-  ws.onopen=()=>{ setBadge('conectado'); addLog('Conexão estabelecida.',''); };
-  ws.onclose=()=>{ setBadge('desconectado'); addLog('Conexão perdida. Reconectando em 3s...','erro'); setTimeout(conectar,3000); };
-  ws.onerror=()=>setBadge('desconectado');
-  ws.onmessage=(evt)=>{
-    let d; try{ d=JSON.parse(evt.data); }catch(e){ return; }
-    document.getElementById('info-hora').textContent='último dado: '+ts();
-    if(d.tipo==='estado_inicial'){ aplicarEstado(d.estado); addLog('Estado inicial recebido.',''); return; }
+  const statusBox = document.getElementById('status-box');
+  const statusText = document.getElementById('status-text');
+  
+  socket = io({ transports: ["polling", "websocket"] });
+
+  socket.on('connect', () => {
+    statusBox.className = 'conn-status conectado';
+    statusText.textContent = 'SISTEMA_ONLINE';
+    addLog('Conexão Estabelecida com o Sistema','');
+  });
+
+  socket.on('disconnect', () => {
+    statusBox.className = 'conn-status desconectado';
+    statusText.textContent = 'LINK_PERDIDO';
+    addLog('Link Perdido - Tentando Reconectar...','erro');
+  });
+
+  socket.on('evento', (d) => {
+    document.getElementById('info-hora').textContent = ts();
+    if(d.tipo==='estado_inicial'){ aplicarEstado(d.estado); return; }
     if(d.estado) aplicarEstado(d.estado);
-    switch(d.tipo){
-      case 'entrada': document.getElementById('val-uid').textContent=d.uid; document.getElementById('val-uid-acao').textContent='entrada '+ts(); addLog(d.msg,'entrada'); break;
-      case 'saida':   document.getElementById('val-uid').textContent=d.uid; document.getElementById('val-uid-acao').textContent='saída '+ts();   addLog(d.msg,'saida');   break;
-      case 'temp':       addLog(d.msg,''); break;
-      case 'ventilador': addLog(d.msg, d.ligado?'on':'off'); break;
-      case 'temp_limite':
-        document.getElementById('limite-atual').textContent='Limite atual: '+parseFloat(d.valor).toFixed(1)+'°C';
-        addLog(d.msg,'limite'); break;
-      case 'erro': addLog(d.msg,'erro'); break;
-      default: if(d.msg) addLog(d.msg,'');
-    }
-  };
+    
+    let tipoLog = '';
+    if(d.tipo==='entrada') tipoLog = 'entrada';
+    else if(d.tipo==='saida') tipoLog = 'saida';
+    else if(d.tipo==='ventilador') tipoLog = d.ligado?'on':'';
+    
+    if(d.msg) addLog(d.msg, tipoLog);
+  });
 }
 
-setInterval(()=>{ const h=document.getElementById('info-hora'); if(!h.textContent.startsWith('último')) h.textContent=ts(); },1000);
-conectar();
+document.addEventListener('DOMContentLoaded', conectar);
+setInterval(() => { if(!socket || !socket.connected) document.getElementById('info-hora').textContent = ts(); }, 1000);
 </script>
 </body>
 </html>

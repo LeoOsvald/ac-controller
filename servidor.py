@@ -7,7 +7,7 @@ from datetime import datetime
 from flask import Flask
 from flask_socketio import SocketIO, emit
 
-PORTA_ARDUINO = "/dev/ttyACM1"
+PORTA_ARDUINO = "/dev/ttyACM0" # Pode variar, a função detectar_arduino tenta encontrar
 BAUD_RATE     = 9600
 
 app      = Flask(__name__)
@@ -28,7 +28,28 @@ def detectar_arduino():
             return p.device
     return PORTA_ARDUINO
 
+def verificar_e_controlar_ventilador():
+    global estado, serial_conn
+    if estado["temperatura"] is not None and estado["alunos"] is not None:
+        temp_atual = estado["temperatura"]
+        temp_limite = estado["temp_limite"]
+        alunos_presentes = estado["alunos"]
+        ventilador_ligado = estado["ventilador"]
+
+        # Regra: Ligar se Temperatura > Limite E Alunos > 1
+        deve_ligar = (temp_atual > temp_limite) and (alunos_presentes > 1)
+
+        if deve_ligar and not ventilador_ligado:
+            if serial_conn and serial_conn.is_open:
+                serial_conn.write(b"VENTILADOR:LIGAR\n")
+                print("[CONTROLE] Enviando comando: VENTILADOR:LIGAR")
+        elif not deve_ligar and ventilador_ligado:
+            if serial_conn and serial_conn.is_open:
+                serial_conn.write(b"VENTILADOR:DESLIGAR\n")
+                print("[CONTROLE] Enviando comando: VENTILADOR:DESLIGAR")
+
 def parsear_linha(linha):
+    global estado
     linha = linha.strip()
     if not linha: return None
     evento = {"tipo":"log","msg":linha,"ts":datetime.now().strftime("%H:%M:%S")}
@@ -80,6 +101,8 @@ def loop_serial():
             serial_conn = serial.Serial(porta, BAUD_RATE, timeout=2)
             time.sleep(2)
             print("[SERIAL] Conectado!")
+            # Solicitar o limite de temperatura atual do Arduino ao conectar
+            serial_conn.write(b"GET_TEMP_LIMITE\n")
             while True:
                 linha = serial_conn.readline().decode("utf-8", errors="replace").strip()
                 if linha:
@@ -87,6 +110,8 @@ def loop_serial():
                     evento = parsear_linha(linha)
                     if evento:
                         socketio.emit("evento", evento)
+                        # Verificar e controlar o ventilador após cada atualização de estado
+                        verificar_e_controlar_ventilador()
         except Exception as e:
             serial_conn = None
             print(f"[SERIAL] Erro: {e}. Reconectando em 5s...")
@@ -100,7 +125,7 @@ def index():
 @socketio.on("connect")
 def on_connect():
     print("[WS] Cliente conectado")
-    emit("estado_inicial", {
+    emit("evento", {
         "tipo":"estado_inicial",
         "estado":dict(estado),
         "ts":datetime.now().strftime("%H:%M:%S")
@@ -122,4 +147,4 @@ if __name__ == "__main__":
     print("=" * 50)
     print("  Painel em http://localhost:8080")
     print("=" * 50)
-    socketio.run(app, host="0.0.0.0", port=8080, debug=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, host="0.0.0.0", port=8765, debug=False, allow_unsafe_werkzeug=True)
