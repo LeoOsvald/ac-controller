@@ -415,7 +415,6 @@ function aplicarEstado(e){
 
   if(e.ultimo_uid) document.getElementById('val-uid').textContent=e.ultimo_uid;
   if(e.temp_limite!=null){
-    document.getElementById('input-limite').value=parseFloat(e.temp_limite).toFixed(1);
     document.getElementById('limite-atual').textContent='ALVO: '+parseFloat(e.temp_limite).toFixed(1)+'°C';
   }
 }
